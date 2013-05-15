@@ -14,18 +14,18 @@ cd to NGINX source directory & run this:
 ### Example nginx.conf
 
 
-http {
-    default_type  application/octet-stream;
+    http {
+        default_type  application/octet-stream;
 
-    server {
-        listen       80;
-        server_name  _;
+        server {
+            listen       80;
+            server_name  _;
 
-        location / {
-            rsplit on;
-            rsplit_frag_size 1024k;
-            proxy_pass http://origin;
+            location / {
+                rsplit on;
+                rsplit_frag_size 1024k;
+                proxy_pass http://origin;
+            }
+
         }
-
     }
-}
