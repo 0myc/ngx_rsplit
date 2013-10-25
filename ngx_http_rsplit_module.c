@@ -554,6 +554,7 @@ ngx_http_rsplit_range_not_satisfiable(ngx_http_request_t *r,
                                            ctx->resp_body_len)
                                - content_range->value.data;
 
+    ngx_http_set_ctx(r, NULL, ngx_http_rsplit_module);
     ngx_http_clear_content_length(r);
 
     return NGX_HTTP_RANGE_NOT_SATISFIABLE;
@@ -824,7 +825,10 @@ without_range:
     r->headers_out.status = NGX_HTTP_OK;
     r->headers_out.status_line.len = 0;
     r->headers_out.content_length_n = ctx->resp_body_len;
-    r->headers_in.range = NULL;
+
+    if (r->headers_in.range) {
+        r->headers_in.range->value.len = 0;
+    }
 
     // XXX: dirty-hack
     ht->hash = 0;
