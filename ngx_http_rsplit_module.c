@@ -1,6 +1,9 @@
 
 /*
- * Copyright (C) Igor Sysoev
+ * Copyright (C) Eugene Mychlo
+ * 
+ * Licence: This module could be distributed under the
+ * same terms as Nginx itself.
  */
 
 #include <ngx_config.h>
