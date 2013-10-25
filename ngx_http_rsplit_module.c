@@ -49,7 +49,11 @@ static ngx_int_t ngx_http_rsplit_headers_send(ngx_http_request_t *r,
 static ngx_int_t ngx_http_rsplit_set_req_range(ngx_http_request_t *r,
     ngx_http_rsplit_ctx_t *ctx);
 
-static ngx_int_t ngx_http_rsplit_range_parse(ngx_http_rsplit_ctx_t *ctx);
+static ngx_table_elt_t * ngx_http_rsplit_get_resp_range(ngx_http_request_t *r);
+static ngx_int_t ngx_http_rsplit_parse_resp_range(ngx_http_rsplit_ctx_t *ctx,
+    ngx_table_elt_t *ht);
+
+static ngx_int_t ngx_http_rsplit_parse_req_range(ngx_http_rsplit_ctx_t *ctx);
 
 static ngx_int_t ngx_http_rsplit_singlepart_header(ngx_http_request_t *r,
     ngx_http_rsplit_ctx_t *ctx);
@@ -201,7 +205,7 @@ ngx_http_rsplit_handler(ngx_http_request_t *r)
 
 
     if (ctx->req_range_str.len > 0) {
-        rc = ngx_http_rsplit_range_parse(ctx);
+        rc = ngx_http_rsplit_parse_req_range(ctx);
         switch(rc) {
         case NGX_OK:
             ctx->cur_frag = ctx->req_range.start / rslcf->frag_size;
@@ -226,7 +230,6 @@ ngx_http_rsplit_handler(ngx_http_request_t *r)
     }
 
     ctx->cur_frag++;
-    r->allow_ranges = 1; //XXX
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                  "http rsplit request range %V", &r->headers_in.range->value);
@@ -260,15 +263,16 @@ ngx_http_rsplit_header_filter(ngx_http_request_t *r)
     switch (r->headers_out.status) {
     case NGX_HTTP_PARTIAL_CONTENT:
         
-        if (ctx->send_not_satisfiable) {
-            return ngx_http_rsplit_range_not_satisfiable(r, ctx);
-        }
-
+        r->allow_ranges = 1;
         rc = ngx_http_rsplit_headers_send(r, ctx);
 
-        if (rc == NGX_ERROR) {
+        switch (rc) {
+        case NGX_ERROR:
             ngx_http_set_ctx(r, NULL, ngx_http_rsplit_module);
             return NGX_ERROR;
+
+        case NGX_HTTP_RANGE_NOT_SATISFIABLE:
+            return ngx_http_rsplit_range_not_satisfiable(r, ctx);
         }
 
         break;
@@ -521,21 +525,26 @@ static ngx_int_t
 ngx_http_rsplit_range_not_satisfiable(ngx_http_request_t *r,
      ngx_http_rsplit_ctx_t *ctx)
 {
-    ngx_table_elt_t  *content_range;
+    ngx_table_elt_t    *content_range;
 
-    r->headers_out.status = NGX_HTTP_RANGE_NOT_SATISFIABLE;
+    content_range = ngx_http_rsplit_get_resp_range(r);
 
-    content_range = ngx_list_push(&r->headers_out.headers);
+    /* Content-Range header is not found in r->headers_out */
     if (content_range == NULL) {
         return NGX_ERROR;
     }
 
+    if (ngx_http_rsplit_parse_resp_range(ctx, content_range) == NGX_ERROR) {
+        return NGX_ERROR;
+    }
 
-    content_range->hash = 1;
-    ngx_str_set(&content_range->key, "Content-Range");
+
+    r->headers_out.status = NGX_HTTP_RANGE_NOT_SATISFIABLE;
+    r->headers_out.status_line.len = 0;
 
     content_range->value.data = ngx_pnalloc(r->pool,
                                        sizeof("bytes */") - 1 + NGX_OFF_T_LEN);
+
     if (content_range->value.data == NULL) {
         return NGX_ERROR;
     }
@@ -657,21 +666,12 @@ ngx_http_rsplit_set_req_range(ngx_http_request_t *r, ngx_http_rsplit_ctx_t *ctx)
     return NGX_OK;
 }
 
-
-
-static ngx_int_t
-ngx_http_rsplit_headers_send(ngx_http_request_t *r, ngx_http_rsplit_ctx_t *ctx)
+static ngx_table_elt_t *
+ngx_http_rsplit_get_resp_range(ngx_http_request_t *r)
 {
-    ngx_http_core_loc_conf_t *clcf;
-    u_char            *p;
-    ngx_uint_t         i;
-    ssize_t            len;
-    ngx_table_elt_t    *h, *ht;
-    ngx_list_part_t    *part;
-    ngx_str_t          *cr;
-    ngx_http_range_t   *rr;
-
-    clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
+    ngx_table_elt_t     *h;
+    ngx_list_part_t     *part;
+    ngx_uint_t          i;
 
     part = &r->headers_out.headers.part;
     h = part->elts;
@@ -690,18 +690,27 @@ ngx_http_rsplit_headers_send(ngx_http_request_t *r, ngx_http_rsplit_ctx_t *ctx)
         if ( h[i].key.len == sizeof("Content-Range") - 1 && 
             ngx_strcasecmp((u_char *)"Content-Range", h[i].key.data) == 0)
         {
-            ht = &h[i];
-            cr = &h[i].value;
-            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                "rsplit header Content-Range: %V", &h[i].value );
+            return &h[i];
         }
     }
 
-    
+    return NULL;
+}
+
+
+static ngx_int_t
+ngx_http_rsplit_parse_resp_range(ngx_http_rsplit_ctx_t *ctx,
+    ngx_table_elt_t *ht)
+{
+    ngx_str_t   *cr;
+    u_char      *p;
+    ssize_t     len;
+    ngx_uint_t  i;
+
+    cr = &ht->value;
     if (cr == NULL || cr->len <= sizeof("bytes -/") - 1) {
         return NGX_ERROR;
     }
-
 
     /*Content-Range: bytes 8-100/1685044 */ 
 
@@ -732,29 +741,74 @@ ngx_http_rsplit_headers_send(ngx_http_request_t *r, ngx_http_rsplit_ctx_t *ctx)
         }
     }
 
-    if (len == NGX_ERROR)
+    if (len == NGX_ERROR) {
         return NGX_ERROR;
+    }
 
     ctx->resp_body_len = len;
 
+    return NGX_OK;
+}
+
+
+
+static ngx_int_t
+ngx_http_rsplit_headers_send(ngx_http_request_t *r, ngx_http_rsplit_ctx_t *ctx)
+{
+    ngx_table_elt_t    *ht;
+    ngx_http_range_t   *rr;
+
+
+    if (ctx->send_not_satisfiable) {
+        return NGX_HTTP_RANGE_NOT_SATISFIABLE;
+    }
+
+    ht = ngx_http_rsplit_get_resp_range(r);
+
+    /* Content-Range header is not found in r->headers_out */
+    if (ht == NULL) {
+        return NGX_ERROR;
+    }
+
+    if (ngx_http_rsplit_parse_resp_range(ctx, ht) == NGX_ERROR) {
+        return NGX_ERROR;
+    }
 
     if (ctx->send_range) {
         rr = &ctx->req_range;
 
         if (rr->end == NGX_MAX_OFF_T_VALUE) {
             if (rr->size == NGX_MAX_OFF_T_VALUE) {
+                // Range: bytes=SSSS-
+
+                if (ctx->resp_body_len < rr->start) {
+                    return NGX_HTTP_RANGE_NOT_SATISFIABLE;
+                }
+
+
                 rr->end = ctx->resp_body_len;
                 rr->size = ctx->resp_body_len - rr->start;
             } else {
+                // Range: bytes=-EEEE
+
+                if (ctx->resp_body_len < rr->size) {
+                    goto without_range;
+                }
+
                 rr->start = ctx->resp_body_len - rr->size;
                 rr->end = ctx->resp_body_len;
             }
-        }
+        } else {
+            // Range: bytes=SSSS-EEEE
 
+            if (ctx->resp_body_len < rr->end) {
+                rr->end = ctx->resp_body_len;
+                rr->size = ctx->resp_body_len - rr->start;
+            }
+        }
 
         r->headers_out.status = NGX_HTTP_PARTIAL_CONTENT;
         r->headers_out.status_line.len = 0;
-        r->allow_ranges = 1;
 
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
             "rsplit send status NGX_HTTP_PARTIAL_CONTENT");
@@ -764,10 +818,13 @@ ngx_http_rsplit_headers_send(ngx_http_request_t *r, ngx_http_rsplit_ctx_t *ctx)
     }
 
 
+without_range:
+    ctx->send_range = 0;
+
     r->headers_out.status = NGX_HTTP_OK;
     r->headers_out.status_line.len = 0;
     r->headers_out.content_length_n = ctx->resp_body_len;
-    r->allow_ranges = 1;
+    r->headers_in.range = NULL;
 
     // XXX: dirty-hack
     ht->hash = 0;
@@ -781,7 +838,7 @@ ngx_http_rsplit_headers_send(ngx_http_request_t *r, ngx_http_rsplit_ctx_t *ctx)
 }
 
 static ngx_int_t
-ngx_http_rsplit_range_parse(ngx_http_rsplit_ctx_t *ctx) 
+ngx_http_rsplit_parse_req_range(ngx_http_rsplit_ctx_t *ctx) 
 {
     u_char            *p;
     off_t              start, end, size;
