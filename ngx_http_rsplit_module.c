@@ -19,7 +19,6 @@ typedef struct {
     off_t        start;
     off_t        end;
     off_t        size;
-//    ngx_str_t    content_range;
 } ngx_http_range_t;
 
 
@@ -46,17 +45,25 @@ typedef struct {
 static void * ngx_http_rsplit_create_loc_conf(ngx_conf_t *);
 static char * ngx_http_rsplit_merge_loc_conf(ngx_conf_t *, void *, void *);
 static ngx_int_t ngx_http_rsplit_filter_init(ngx_conf_t *cf);
+static ngx_int_t ngx_http_rsplit_handler(ngx_http_request_t *r);
+static ngx_int_t ngx_http_rsplit_header_filter(ngx_http_request_t *r);
+static ngx_int_t ngx_http_rsplit_body_filter(ngx_http_request_t *r,
+    ngx_chain_t *in);
+static ngx_int_t ngx_http_rsplit_add_variables(ngx_conf_t *cf);
+static ngx_int_t ngx_http_rsplit_range_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
+
 
 static ngx_int_t ngx_http_rsplit_headers_send(ngx_http_request_t *r,
     ngx_http_rsplit_ctx_t *ctx);
+
+static ngx_int_t ngx_http_rsplit_parse_req_range(ngx_http_rsplit_ctx_t *ctx);
 static ngx_int_t ngx_http_rsplit_set_req_range(ngx_http_request_t *r,
     ngx_http_rsplit_ctx_t *ctx);
 
 static ngx_table_elt_t * ngx_http_rsplit_get_resp_range(ngx_http_request_t *r);
 static ngx_int_t ngx_http_rsplit_parse_resp_range(ngx_http_rsplit_ctx_t *ctx,
     ngx_table_elt_t *ht);
-
-static ngx_int_t ngx_http_rsplit_parse_req_range(ngx_http_rsplit_ctx_t *ctx);
 
 static ngx_int_t ngx_http_rsplit_singlepart_header(ngx_http_request_t *r,
     ngx_http_rsplit_ctx_t *ctx);
@@ -67,18 +74,8 @@ static ngx_int_t ngx_http_rsplit_body_next_frag(ngx_http_request_t *r,
 
 static ngx_int_t ngx_http_rsplit_range_not_satisfiable(ngx_http_request_t *r,
     ngx_http_rsplit_ctx_t *ctx);
-
-static ngx_int_t ngx_http_rsplit_handler(ngx_http_request_t *r);
-static ngx_int_t ngx_http_rsplit_header_filter(ngx_http_request_t *r);
-static ngx_int_t ngx_http_rsplit_body_filter(ngx_http_request_t *r,
-    ngx_chain_t *in);
-
 static ngx_int_t ngx_http_rsplit_resume_handler(ngx_http_request_t *r,
     void *data, ngx_int_t rc);
-
-static ngx_int_t ngx_http_rsplit_add_variables(ngx_conf_t *cf);
-static ngx_int_t ngx_http_rsplit_range_variable(ngx_http_request_t *r,
-    ngx_http_variable_value_t *v, uintptr_t data);
 
 static ngx_command_t  ngx_http_rsplit_commands[] = {
 
@@ -197,15 +194,7 @@ ngx_http_rsplit_handler(ngx_http_request_t *r)
             ctx->req_range_str.len  = r->headers_in.range->value.len;
         }
 
-    } else {
-        r->headers_in.range = ngx_list_push(&r->headers_in.headers);
-        if (r->headers_in.range == NULL) {
-            return NGX_HTTP_INTERNAL_SERVER_ERROR;
-        }
-
-        ngx_str_set(&r->headers_in.range->key, "Range");
     }
-
 
     if (ctx->req_range_str.len > 0) {
         rc = ngx_http_rsplit_parse_req_range(ctx);
@@ -235,7 +224,7 @@ ngx_http_rsplit_handler(ngx_http_request_t *r)
     ctx->cur_frag++;
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                 "http rsplit request range %V", &r->headers_in.range->value);
+                 "http rsplit request range %V", &ctx->cur_range);
 
     return NGX_DECLINED;
 }
@@ -246,19 +235,17 @@ ngx_http_rsplit_header_filter(ngx_http_request_t *r)
     ngx_http_rsplit_ctx_t       *ctx;
     ngx_int_t                   rc;
 
-    if (r->header_only
-        || r != r->main
-        || r->headers_out.content_length_n == -1)
+    ctx = ngx_http_get_module_ctx(r, ngx_http_rsplit_module);
+
+    if (ctx == NULL || r != r->main) {
+        return ngx_http_next_header_filter(r);
+    }
+
+    if (!ctx->do_split || r->headers_out.content_length_n == -1)
     {
         return ngx_http_next_header_filter(r);
     }
 
-
-    ctx = ngx_http_get_module_ctx(r, ngx_http_rsplit_module);
-
-    if (ctx == NULL || !ctx->do_split) {
-        return ngx_http_next_header_filter(r);
-    }
 
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                  "http rsplit header filter");
@@ -271,7 +258,6 @@ ngx_http_rsplit_header_filter(ngx_http_request_t *r)
 
         switch (rc) {
         case NGX_ERROR:
-            ngx_http_set_ctx(r, NULL, ngx_http_rsplit_module);
             return NGX_ERROR;
 
         case NGX_HTTP_RANGE_NOT_SATISFIABLE:
@@ -281,10 +267,10 @@ ngx_http_rsplit_header_filter(ngx_http_request_t *r)
         break;
 
     default:
-        ngx_http_set_ctx(r, NULL, ngx_http_rsplit_module);
+        ctx->do_split = 0;
         break;
     }
-        
+
     return ngx_http_next_header_filter(r);
 }
 
@@ -298,14 +284,18 @@ ngx_http_rsplit_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
     ctx = ngx_http_get_module_ctx(r == r->main ? r : r->main,
                                                     ngx_http_rsplit_module);
 
-    if (ctx == NULL || !ctx->do_split || r->header_only) {
+    if (ctx == NULL || r->header_only) {
+        return ngx_http_next_body_filter(r, in);
+    }
+    
+    if (!ctx->do_split) {
         return ngx_http_next_body_filter(r, in);
     }
 
 
     if (ctx->req_done) {
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "rsplit req_done");
-        ngx_http_set_ctx(r, NULL, ngx_http_rsplit_module);
+        ctx->do_split = 0;
         return ngx_http_send_special(r, NGX_HTTP_LAST);
     }
 
@@ -483,7 +473,7 @@ ngx_http_rsplit_body_next_frag(ngx_http_request_t *r,
 
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
             "http rsplit subrequest range %V %O",
-            &r->headers_in.range->value,
+            &ctx->cur_range,
             ctx->resp_body_len);
 
     ctx->cur_frag++;
@@ -624,7 +614,6 @@ ngx_http_rsplit_filter_init(ngx_conf_t *cf)
 static ngx_int_t
 ngx_http_rsplit_set_req_range(ngx_http_request_t *r, ngx_http_rsplit_ctx_t *ctx)
 {
-    ngx_str_t       *val;
     ssize_t     first, last;
 
     first = ctx->frag_size * ctx->cur_frag;
@@ -654,18 +643,8 @@ ngx_http_rsplit_set_req_range(ngx_http_request_t *r, ngx_http_rsplit_ctx_t *ctx)
     ctx->cur_range.len = ngx_sprintf(ctx->cur_range.data,
             "bytes=%z-%z", first, last) - ctx->cur_range.data;
 
-
-    val = &r->headers_in.range->value;
-    val->data = ngx_pnalloc(r->pool, 2 * NGX_INT64_LEN + 7);
-    if (val->data == NULL) {
-        return NGX_ERROR;
-    }
-
-
-    ngx_memcpy(val->data, ctx->cur_range.data, ctx->cur_range.len);
-    val->len = ctx->cur_range.len;
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                "rsplit ngx_http_rsplit_set_req_range %V", val);
+                "rsplit ngx_http_rsplit_set_req_range %V", &ctx->cur_range);
 
     return NGX_OK;
 }
@@ -829,9 +808,11 @@ without_range:
     r->headers_out.status_line.len = 0;
     r->headers_out.content_length_n = ctx->resp_body_len;
 
+#if 0
     if (r->headers_in.range) {
         r->headers_in.range->value.len = 0;
     }
+#endif
 
     // XXX: dirty-hack
     ht->hash = 0;
@@ -973,8 +954,9 @@ ngx_http_rsplit_singlepart_header(ngx_http_request_t *r,
         r->headers_out.content_length = NULL;
     }
 
-    return ngx_http_next_header_filter(r);
+    return NGX_OK;
 }
+
 
 static ngx_int_t
 ngx_http_rsplit_add_variables(ngx_conf_t *cf)
