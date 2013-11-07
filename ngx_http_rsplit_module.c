@@ -327,6 +327,11 @@ ngx_http_rsplit_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         }
     }
 
+    while ((off_t)(ctx->offset + ctx->frag_size) < ctx->req_range.start) {
+        ctx->offset += ctx->frag_size;
+        ctx->cur_frag++;
+    }
+
     return ngx_http_rsplit_body_next_frag(r, ctx);
 }
 
