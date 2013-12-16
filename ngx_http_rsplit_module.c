@@ -481,7 +481,7 @@ ngx_http_rsplit_body_next_frag(ngx_http_request_t *r,
     ctx->subrequest_wait = 1;
     ctx->subrequest_done = 0;
 
-    return ngx_http_subrequest(r, &r->uri, NULL, &sr, psr, 0);
+    return ngx_http_subrequest(r, &r->uri, &r->args, &sr, psr, 0);
 }
 
 
