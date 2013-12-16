@@ -21,7 +21,6 @@ typedef struct {
     off_t        size;
 } ngx_http_range_t;
 
-
 typedef struct {
     ngx_flag_t          do_split;
 
@@ -139,9 +138,6 @@ static ngx_int_t
 ngx_http_rsplit_handler(ngx_http_request_t *r)
 {
     ngx_int_t                   rc;
-    //ngx_log_t                 *log;
-    //ngx_http_request_t        *sr;
-    //ngx_http_range_split_loc_conf_t *srlcf;
     ngx_http_rsplit_loc_conf_t  *rslcf;
     ngx_http_core_loc_conf_t    *clcf;
     ngx_http_rsplit_ctx_t       *ctx;
@@ -284,32 +280,23 @@ ngx_http_rsplit_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
     ctx = ngx_http_get_module_ctx(r == r->main ? r : r->main,
                                                     ngx_http_rsplit_module);
 
-    if (ctx == NULL || r->header_only) {
-        return ngx_http_next_body_filter(r, in);
-    }
-    
-    if (!ctx->do_split) {
+    if (r->header_only || ctx == NULL || !ctx->do_split) {
         return ngx_http_next_body_filter(r, in);
     }
 
-
-    if (ctx->req_done) {
-        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "rsplit req_done");
-        ctx->do_split = 0;
-        return ngx_http_send_special(r, NGX_HTTP_LAST);
-    }
-
+    rc = NGX_OK;
     last = 0;
-    for (cl = in; cl; cl = cl->next) {
-        if (cl->buf->last_buf) {
-            last = 1;
 
-            if (r == r->main && !ctx->subrequest_wait) {
+    if (r == r->main && !ctx->req_done) {
+        for (cl = in; cl; cl = cl->next) {
+            if (cl->buf->last_buf) {
+                last = 1;
                 cl->buf->last_buf = 0;
                 cl->buf->sync = 1;
             }
         }
     }
+
 
     if (ctx->send_range) {
         rc = ngx_http_rsplit_singlepart_body(r, ctx, in);
@@ -317,22 +304,25 @@ ngx_http_rsplit_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         rc = ngx_http_next_body_filter(r, in);
     }
 
-    if (rc == NGX_ERROR) {
+    if (rc == NGX_ERROR || r != r->main || ctx->subrequest_wait) {
         return rc;
     }
 
-    if (!ctx->subrequest_done) {
-        if (ctx->subrequest_wait || !last) {
-            return rc;
+    if (last || ctx->subrequest_done) {
+        if (ctx->send_range) {
+            while ((off_t)(ctx->offset + ctx->frag_size) < ctx->req_range.start) {
+                ctx->offset += ctx->frag_size;
+                ctx->cur_frag++;
+            }
         }
+
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+            "rsplit next frag %i", ctx->cur_frag);
+
+        return ngx_http_rsplit_body_next_frag(r, ctx);
     }
 
-    while ((off_t)(ctx->offset + ctx->frag_size) < ctx->req_range.start) {
-        ctx->offset += ctx->frag_size;
-        ctx->cur_frag++;
-    }
-
-    return ngx_http_rsplit_body_next_frag(r, ctx);
+    return rc;
 }
 
 
@@ -350,6 +340,10 @@ ngx_http_rsplit_singlepart_body(ngx_http_request_t *r,
         return NGX_ERROR;
     }
 
+    if (in == NULL) {
+        ngx_http_next_body_filter(r, in);
+    }
+
     out = NULL;
     ll = &out;
     range = &ctx->req_range;
@@ -363,8 +357,9 @@ ngx_http_rsplit_singlepart_body(ngx_http_request_t *r,
 
         ctx->offset = last;
 
-        ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                       "rsplit body buf: %O-%O", start, last);
+        ngx_log_debug3(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "rsplit body buf s:%O, l:%O, size:%O", start, last,
+                       ngx_buf_size(buf));
 
         if (ngx_buf_special(buf)) {
             *ll = cl;
@@ -395,10 +390,6 @@ ngx_http_rsplit_singlepart_body(ngx_http_request_t *r,
             buf->pos = buf->last;
             buf->sync = 1;
 
-            if (range->end < start) {
-                ctx->do_split = 0;
-            }
-
             continue;
         }
 
@@ -427,19 +418,16 @@ ngx_http_rsplit_singlepart_body(ngx_http_request_t *r,
 
             if (buf->in_file) {
                 buf->file_last -= last - range->end;
-                ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                    "rsplit buf->file_last %O", buf->file_last);
             }
 
             if (ngx_buf_in_memory(buf)) {
                 buf->last -= (size_t) (last - range->end);
-                ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                    "rsplit buf->last %O", buf->last);
             }
 
             buf->last_buf = 1;
             *ll = cl;
             cl->next = NULL;
+            ctx->req_done = 1;
 
             break;
         }
