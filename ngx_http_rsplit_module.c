@@ -43,6 +43,7 @@ typedef struct {
 
 static void * ngx_http_rsplit_create_loc_conf(ngx_conf_t *);
 static char * ngx_http_rsplit_merge_loc_conf(ngx_conf_t *, void *, void *);
+static ngx_int_t ngx_http_rsplit_init(ngx_conf_t *cf);
 static ngx_int_t ngx_http_rsplit_filter_init(ngx_conf_t *cf);
 static ngx_int_t ngx_http_rsplit_handler(ngx_http_request_t *r);
 static ngx_int_t ngx_http_rsplit_header_filter(ngx_http_request_t *r);
@@ -98,34 +99,66 @@ static ngx_command_t  ngx_http_rsplit_commands[] = {
 
 
 static ngx_http_module_t  ngx_http_rsplit_module_ctx = {
-    ngx_http_rsplit_add_variables, /* preconfiguration */
-    ngx_http_rsplit_filter_init,   /* postconfiguration */
+    ngx_http_rsplit_add_variables,      /* preconfiguration */
+    ngx_http_rsplit_init,               /* postconfiguration */
 
-    NULL,                          /* create main configuration */
-    NULL,                          /* init main configuration */
+    NULL,                               /* create main configuration */
+    NULL,                               /* init main configuration */
 
-    NULL,                          /* create server configuration */
-    NULL,                          /* merge server configuration */
+    NULL,                               /* create server configuration */
+    NULL,                               /* merge server configuration */
 
-    ngx_http_rsplit_create_loc_conf,  /* create location configuration */
-    ngx_http_rsplit_merge_loc_conf,   /* merge location configuration */
+    ngx_http_rsplit_create_loc_conf,    /* create location configuration */
+    ngx_http_rsplit_merge_loc_conf,     /* merge location configuration */
 };
 
 
 ngx_module_t  ngx_http_rsplit_module = {
     NGX_MODULE_V1,
-    &ngx_http_rsplit_module_ctx,      /* module context */
-    ngx_http_rsplit_commands,         /* module directives */
-    NGX_HTTP_MODULE,               /* module type */
-    NULL,                          /* init master */
-    NULL,                          /* init module */
-    NULL,                          /* init process */
-    NULL,                          /* init thread */
-    NULL,                          /* exit thread */
-    NULL,                          /* exit process */
-    NULL,                          /* exit master */
+    &ngx_http_rsplit_module_ctx,        /* module context */
+    ngx_http_rsplit_commands,           /* module directives */
+    NGX_HTTP_MODULE,                    /* module type */
+    NULL,                               /* init master */
+    NULL,                               /* init module */
+    NULL,                               /* init process */
+    NULL,                               /* init thread */
+    NULL,                               /* exit thread */
+    NULL,                               /* exit process */
+    NULL,                               /* exit master */
     NGX_MODULE_V1_PADDING
 };
+
+static ngx_http_module_t  ngx_http_rsplit_filter_module_ctx = {
+    NULL,                               /* preconfiguration */
+    ngx_http_rsplit_filter_init,        /* postconfiguration */
+
+    NULL,                               /* create main configuration */
+    NULL,                               /* init main configuration */
+
+    NULL,                               /* create server configuration */
+    NULL,                               /* merge server configuration */
+
+    NULL,                               /* create location configuration */
+    NULL,                               /* merge location configuration */
+};
+
+
+ngx_module_t  ngx_http_rsplit_filter_module = {
+    NGX_MODULE_V1,
+    &ngx_http_rsplit_filter_module_ctx, /* module context */
+    NULL,                               /* module directives */
+    NGX_HTTP_MODULE,                    /* module type */
+    NULL,                               /* init master */
+    NULL,                               /* init module */
+    NULL,                               /* init process */
+    NULL,                               /* init thread */
+    NULL,                               /* exit thread */
+    NULL,                               /* exit process */
+    NULL,                               /* exit master */
+    NGX_MODULE_V1_PADDING
+};
+
+
 
 
 static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
@@ -454,6 +487,7 @@ ngx_http_rsplit_body_next_frag(ngx_http_request_t *r,
     ngx_http_request_t          *sr;
     ngx_int_t                   rc;
     ngx_http_post_subrequest_t  *psr;
+    ngx_uint_t                  flags = NGX_HTTP_SUBREQUEST_WAITED;
 
     rc = ngx_http_rsplit_set_req_range(r, ctx);
     if (rc != NGX_OK) {
@@ -481,7 +515,7 @@ ngx_http_rsplit_body_next_frag(ngx_http_request_t *r,
     ctx->subrequest_wait = 1;
     ctx->subrequest_done = 0;
 
-    return ngx_http_subrequest(r, &r->uri, &r->args, &sr, psr, 0);
+    return ngx_http_subrequest(r, &r->uri, &r->args, &sr, psr, flags);
 }
 
 
@@ -580,7 +614,7 @@ ngx_http_rsplit_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
 
 static ngx_int_t
-ngx_http_rsplit_filter_init(ngx_conf_t *cf)
+ngx_http_rsplit_init(ngx_conf_t *cf)
 {
     ngx_http_core_main_conf_t  *cmcf;
     ngx_http_handler_pt        *h;
@@ -594,7 +628,12 @@ ngx_http_rsplit_filter_init(ngx_conf_t *cf)
     }
 
     *h = ngx_http_rsplit_handler;
+    return NGX_OK;
+}
 
+static ngx_int_t
+ngx_http_rsplit_filter_init(ngx_conf_t *cf)
+{
     ngx_http_next_header_filter = ngx_http_top_header_filter;
     ngx_http_top_header_filter = ngx_http_rsplit_header_filter;
 
