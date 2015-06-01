@@ -32,6 +32,9 @@ typedef struct {
     ngx_str_t           req_range_str;
     ngx_http_range_t    req_range;
 
+    ngx_str_t           uri;
+    ngx_str_t           args;
+
     unsigned            subrequest_wait:1;
     unsigned            subrequest_done:1;
 
@@ -179,11 +182,6 @@ ngx_http_rsplit_handler(ngx_http_request_t *r)
         return NGX_DECLINED;
     }
 
-    if (r->uri.data[r->uri.len - 1] == '/') {
-        return NGX_DECLINED;
-    }
-
-
     if (r != r->main) {
         ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                  "http rsplit SUBREQUEST");
@@ -216,6 +214,10 @@ ngx_http_rsplit_handler(ngx_http_request_t *r)
     ctx->frag_size = rslcf->frag_size;
     ctx->req_range_str.len = 0;
     ctx->cur_frag = 0;
+
+    /* save uri and args to avoid bug http://trac.nginx.org/nginx/ticket/752 */
+    ctx->uri = r->uri;
+    ctx->args = r->args;
 
     if (r->headers_in.range) {
         if (clcf->max_ranges > 0) {
@@ -275,6 +277,15 @@ ngx_http_rsplit_header_filter(ngx_http_request_t *r)
         return ngx_http_next_header_filter(r);
     }
 
+
+    /* Spliting doesn't make sense without any upstream */
+    if (!r->upstream) {
+        ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+            "http rsplit. Request to static. Nothing to do here");
+
+        ctx->do_split = 0;
+        return ngx_http_next_header_filter(r);
+    }
 
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                  "http rsplit header filter");
@@ -515,7 +526,7 @@ ngx_http_rsplit_body_next_frag(ngx_http_request_t *r,
     ctx->subrequest_wait = 1;
     ctx->subrequest_done = 0;
 
-    return ngx_http_subrequest(r, &r->uri, &r->args, &sr, psr, flags);
+    return ngx_http_subrequest(r, &ctx->uri, &ctx->args, &sr, psr, flags);
 }
 
 
