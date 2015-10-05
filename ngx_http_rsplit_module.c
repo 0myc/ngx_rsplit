@@ -272,11 +272,14 @@ ngx_http_rsplit_header_filter(ngx_http_request_t *r)
         return ngx_http_next_header_filter(r);
     }
 
-    if (!ctx->do_split || r->headers_out.content_length_n == -1)
-    {
+    if (!ctx->do_split) {
         return ngx_http_next_header_filter(r);
     }
 
+    if (r->headers_out.content_length_n == -1) {
+        ctx->do_split = 0;
+        return ngx_http_next_header_filter(r);
+    }
 
     /* Spliting doesn't make sense without any upstream */
     if (!r->upstream) {
